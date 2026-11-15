@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.location.*
 import android.os.Bundle
 import android.os.ParcelUuid
+import android.widget.TextView
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.time.*
@@ -20,22 +21,36 @@ class MainActivity : Activity() {
     private val speedUuid = UUID.fromString("7b6f0002-7a4d-4c6f-9a13-4254436c6f63")
     private var gatt: BluetoothGattServer? = null
     @Volatile private var speedKmh = 0f
+    private lateinit var status: TextView
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED)
+        status = TextView(this).apply {
+            text = "Clock BT\nStarting Bluetooth time and GPS service..."
+            textSize = 24f
+            setPadding(40, 40, 40, 40)
+        }
+        setContentView(status)
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 7)
-        startLocation()
-        startServer()
+        }
+        try {
+            startLocation()
+            startServer()
+            status.text = "Clock BT\nRunning\nTime and GPS speed available to StamPLC"
+        } catch (e: SecurityException) {
+            status.text = "Clock BT\nBluetooth permission required"
+        } catch (e: Exception) {
+            status.text = "Clock BT\nBluetooth unavailable: ${e.javaClass.simpleName}"
+        }
     }
 
     private fun startLocation() {
         val lm = getSystemService(LOCATION_SERVICE) as LocationManager
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED)
             lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, object : LocationListener {
                 override fun onLocationChanged(l: Location) { speedKmh = (l.speed * 3.6f).coerceAtLeast(0f) }
             })
-        }
     }
 
     private fun ctsValue(): ByteArray {
@@ -60,14 +75,14 @@ class MainActivity : Activity() {
                 }
             }
         }
-        gatt = mgr.openGattServer(this, cb)
+        gatt = mgr.openGattServer(this, cb) ?: error("GATT server unavailable")
         val timeService = BluetoothGattService(cts, BluetoothGattService.SERVICE_TYPE_PRIMARY)
         timeService.addCharacteristic(BluetoothGattCharacteristic(currentTime, BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ))
         gatt?.addService(timeService)
         val speedService = BluetoothGattService(clockBtService, BluetoothGattService.SERVICE_TYPE_PRIMARY)
         speedService.addCharacteristic(BluetoothGattCharacteristic(speedUuid, BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_NOTIFY, BluetoothGattCharacteristic.PERMISSION_READ))
         gatt?.addService(speedService)
-        val adv = a.bluetoothLeAdvertiser ?: return
+        val adv = a.bluetoothLeAdvertiser ?: error("BLE advertiser unavailable")
         adv.startAdvertising(AdvertiseSettings.Builder().setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_POWER)
             .setConnectable(true).setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_LOW).build(),
             AdvertiseData.Builder().setIncludeDeviceName(true).addServiceUuid(ParcelUuid(cts)).addServiceUuid(ParcelUuid(clockBtService)).build(),
