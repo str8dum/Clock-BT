@@ -16,7 +16,11 @@ class MainActivity : Activity() {
     private lateinit var label: TextView
     private val handler = Handler(Looper.getMainLooper())
     private val refresh = object : Runnable {
-        override fun run() { label.text = "Clock USB\n\n" + ClockService.state + "\n\nYou can return to the home screen. The service stays running."; handler.postDelayed(this, 1000) }
+        override fun run() {
+            label.text = "Clock USB\n\n" + ClockService.state
+            if (ClockService.transferring) { moveTaskToBack(true); return }
+            handler.postDelayed(this, 1000)
+        }
     }
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -35,7 +39,7 @@ class BootReceiver : BroadcastReceiver() {
 }
 
 class ClockService : Service(), LocationListener {
-    companion object { @Volatile var state = "Starting USB service" }
+    companion object { @Volatile var state = "Starting USB service"; @Volatile var transferring = false }
     private val permissionAction = "com.str8dum.clockbt.USB_PERMISSION"
     private lateinit var usb: UsbManager
     private lateinit var locations: LocationManager
@@ -87,7 +91,7 @@ class ClockService : Service(), LocationListener {
     private fun tick() {
         if(connection == null) {
             val dev = usb.deviceList.values.firstOrNull { it.vendorId == 0x303a && it.productId == 0x1001 }
-            if(dev == null) { state = "Waiting for StamPLC USB device"; return }
+            if(dev == null) { state = "Waiting for StamPLC USB device"; if (writes == 0L) Log.i("ClockUSB", state); return }
             if(!usb.hasPermission(dev)) {
                 state = "Waiting for Android USB permission"
                 if(requested != dev.deviceName) {
@@ -124,12 +128,14 @@ class ClockService : Service(), LocationListener {
         val bytes = String.format(Locale.US,"TIME,%02d:%02d\nSPEED,%.1f\n",now.hour,now.minute,speed).toByteArray(Charsets.US_ASCII)
         val sent = connection!!.bulkTransfer(output!!,bytes,bytes.size,1000)
         if(sent != bytes.size) error("USB write failed ($sent of ${bytes.size} bytes)")
+        transferring = true
         writes++
         state = String.format(Locale.US,"USB writes confirmed: %d\nTime %02d:%02d\nSpeed %.1f MPH\nGPS: %s",writes,now.hour,now.minute,speed,if(fixAt != 0L && SystemClock.elapsedRealtime()-fixAt < 5000) "receiving" else "waiting for fix")
         if(writes % 10L == 1L) Log.i("ClockUSB",state)
     }
     @Synchronized private fun closeUsb() {
         try { dataInterface?.let { connection?.releaseInterface(it) }; connection?.close() } catch(_: Exception) {}
+        transferring = false
         connection = null; dataInterface = null; output = null
     }
     override fun onStartCommand(i: Intent?, flags: Int, id: Int) = START_STICKY
