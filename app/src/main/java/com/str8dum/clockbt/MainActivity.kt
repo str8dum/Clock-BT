@@ -101,7 +101,7 @@ class MainActivity : Activity() {
         val iface = dev.getInterface(0)
         val out = (0 until iface.endpointCount).map { iface.getEndpoint(it) }.firstOrNull { it.direction == 0 }
         usbConnection = um.openDevice(dev)
-        if (usbConnection != null && out != null) {
+        if (usbConnection != null && out != null && usbConnection!!.claimInterface(iface, true)) {
             Thread {
                 while (!isFinishing) {
                     val n = ZonedDateTime.now()
