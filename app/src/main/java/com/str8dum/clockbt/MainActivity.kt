@@ -8,6 +8,8 @@ import android.content.pm.PackageManager
 import android.location.*
 import android.os.Bundle
 import android.os.ParcelUuid
+import android.hardware.usb.UsbManager
+import android.hardware.usb.UsbDeviceConnection
 import android.widget.TextView
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -22,6 +24,7 @@ class MainActivity : Activity() {
     private var gatt: BluetoothGattServer? = null
     @Volatile private var speedKmh = 0f
     private lateinit var status: TextView
+    private var usbConnection: UsbDeviceConnection? = null
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -37,6 +40,7 @@ class MainActivity : Activity() {
         try {
             startLocation()
             startServer()
+            startUsbSerial()
             status.text = "Clock BT\nRunning\nTime and GPS speed available to StamPLC"
         } catch (e: SecurityException) {
             status.text = "Clock BT\nBluetooth permission required"
@@ -87,6 +91,25 @@ class MainActivity : Activity() {
             .setConnectable(true).setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_LOW).build(),
             AdvertiseData.Builder().setIncludeDeviceName(true).addServiceUuid(ParcelUuid(cts)).addServiceUuid(ParcelUuid(clockBtService)).build(),
             object : AdvertiseCallback() {})
+    }
+
+    private fun startUsbSerial() {
+        val um = getSystemService(USB_SERVICE) as UsbManager
+        val dev = um.deviceList.values.firstOrNull() ?: return
+        if (!um.hasPermission(dev)) { status.text = "Clock BT\nWaiting for USB permission"; return }
+        val iface = dev.getInterface(0)
+        val out = (0 until iface.endpointCount).map { iface.getEndpoint(it) }.firstOrNull { it.direction == 0 }
+        usbConnection = um.openDevice(dev)
+        if (usbConnection != null && out != null) {
+            Thread {
+                while (!isFinishing) {
+                    val n = ZonedDateTime.now()
+                    val msg = "TIME,%02d:%02d\\nSPEED,%.1f\\n".format(n.hour, n.minute, speedKmh * 0.621371f)
+                    usbConnection?.bulkTransfer(out, msg.toByteArray(), msg.length, 1000)
+                    Thread.sleep(10000)
+                }
+            }.start()
+        }
     }
 
     override fun onDestroy() { gatt?.close(); super.onDestroy() }
