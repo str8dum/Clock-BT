@@ -41,9 +41,8 @@ class MainActivity : Activity() {
         }
         try {
             startLocation()
-            startServer()
             startUsbSerial()
-            status.text = "Clock BT\nRunning\nTime and GPS speed available to StamPLC"
+            status.text = "Clock BT\nUSB serial active\nTime and GPS speed available to StamPLC"
         } catch (e: SecurityException) {
             status.text = "Clock BT\nUSB serial permission required"
         } catch (e: Exception) {
