@@ -1,117 +1,138 @@
 package com.str8dum.clockbt
 
 import android.Manifest
-import android.app.Activity
-import android.bluetooth.*
-import android.bluetooth.le.*
+import android.app.*
+import android.content.*
 import android.content.pm.PackageManager
+import android.hardware.usb.*
 import android.location.*
-import android.os.Bundle
-import android.os.ParcelUuid
-import android.app.PendingIntent
-import android.content.Intent
-import android.hardware.usb.UsbManager
-import android.hardware.usb.UsbDeviceConnection
+import android.os.*
+import android.util.Log
 import android.widget.TextView
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.time.*
-import java.util.*
+import java.time.LocalTime
+import java.util.Locale
 
 class MainActivity : Activity() {
-    private val cts = UUID.fromString("00001805-0000-1000-8000-00805f9b34fb")
-    private val currentTime = UUID.fromString("00002a2b-0000-1000-8000-00805f9b34fb")
-    private val clockBtService = UUID.fromString("7b6f0001-7a4d-4c6f-9a13-4254436c6f63")
-    private val speedUuid = UUID.fromString("7b6f0002-7a4d-4c6f-9a13-4254436c6f63")
-    private var gatt: BluetoothGattServer? = null
-    @Volatile private var speedKmh = 0f
-    private lateinit var status: TextView
-    private var usbConnection: UsbDeviceConnection? = null
-
+    private lateinit var label: TextView
+    private val handler = Handler(Looper.getMainLooper())
+    private val refresh = object : Runnable {
+        override fun run() { label.text = "Clock USB\n\n" + ClockService.state + "\n\nYou can return to the home screen. The service stays running."; handler.postDelayed(this, 1000) }
+    }
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
-        status = TextView(this).apply {
-            text = "Clock BT\nStarting Bluetooth time and GPS service..."
-            textSize = 24f
-            setPadding(40, 40, 40, 40)
-        }
-        setContentView(status)
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+        label = TextView(this).apply { textSize = 24f; setPadding(32,32,32,32); setTextColor(0xffffb000.toInt()); setBackgroundColor(0xff101010.toInt()) }
+        setContentView(label)
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 7)
+        startForegroundService(Intent(this, ClockService::class.java))
+    }
+    override fun onResume() { super.onResume(); handler.post(refresh) }
+    override fun onPause() { handler.removeCallbacks(refresh); super.onPause() }
+}
+
+class BootReceiver : BroadcastReceiver() {
+    override fun onReceive(c: Context, i: Intent) { c.startForegroundService(Intent(c, ClockService::class.java)) }
+}
+
+class ClockService : Service(), LocationListener {
+    companion object { @Volatile var state = "Starting USB service" }
+    private val permissionAction = "com.str8dum.clockbt.USB_PERMISSION"
+    private lateinit var usb: UsbManager
+    private lateinit var locations: LocationManager
+    private var connection: UsbDeviceConnection? = null
+    private var dataInterface: UsbInterface? = null
+    private var output: UsbEndpoint? = null
+    private var controlId = 0
+    @Volatile private var running = true
+    @Volatile private var mph = 0f
+    @Volatile private var fixAt = 0L
+    private var requested: String? = null
+    private var locationStarted = false
+    private var writes = 0L
+    private val receiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            if (i.action == permissionAction) {
+                requested = null
+                state = if(i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) "USB access granted; opening StamPLC" else "USB access denied. Reconnect StamPLC to retry."
+            }
+            if (i.action == UsbManager.ACTION_USB_DEVICE_DETACHED) { closeUsb(); requested = null }
         }
-        try {
-            startLocation()
-            startUsbSerial()
-            status.text = "Clock BT\nUSB serial active\nTime and GPS speed available to StamPLC"
-        } catch (e: SecurityException) {
-            status.text = "Clock BT\nUSB serial permission required"
-        } catch (e: Exception) {
-            status.text = "Clock BT\nUSB serial unavailable: ${e.javaClass.simpleName}"
+    }
+    override fun onCreate() {
+        super.onCreate()
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        nm.createNotificationChannel(NotificationChannel("clock", "Clock USB service", NotificationManager.IMPORTANCE_LOW))
+        startForeground(1, Notification.Builder(this,"clock").setContentTitle("Clock USB").setContentText("Sending time and GPS speed to StamPLC").setSmallIcon(android.R.drawable.ic_menu_recent_history).build())
+        usb = getSystemService(USB_SERVICE) as UsbManager
+        locations = getSystemService(LOCATION_SERVICE) as LocationManager
+        val filter = IntentFilter(permissionAction).apply { addAction(UsbManager.ACTION_USB_DEVICE_DETACHED) }
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED) else registerReceiver(receiver, filter)
+        Thread({
+            while(running) {
+                try { startGps(); tick() } catch(e: Exception) { state = "USB error: " + e.message; Log.e("ClockUSB", state, e); closeUsb() }
+                try { Thread.sleep(1000) } catch(e: InterruptedException) { break }
+            }
+        }, "ClockUSB").start()
+    }
+    private fun startGps() {
+        if (!locationStarted && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+            locations.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this, Looper.getMainLooper())
+            locationStarted = true
         }
     }
-
-    private fun startLocation() {
-        val lm = getSystemService(LOCATION_SERVICE) as LocationManager
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED)
-            lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, object : LocationListener {
-                override fun onLocationChanged(l: Location) { speedKmh = (l.speed * 3.6f).coerceAtLeast(0f) }
-            })
-    }
-
-    private fun ctsValue(): ByteArray {
-        val n = ZonedDateTime.now()
-        return byteArrayOf((n.year and 0xff).toByte(), ((n.year ushr 8) and 0xff).toByte(),
-            n.monthValue.toByte(), n.dayOfMonth.toByte(), n.hour.toByte(), n.minute.toByte(),
-            n.second.toByte(), n.dayOfWeek.value.toByte(), 0, 0)
-    }
-
-    private fun speedValue(): ByteArray =
-        ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putFloat(speedKmh).array()
-
-    private fun startServer() {
-        val mgr = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
-        val a = getSystemService(BLUETOOTH_SERVICE) as BluetoothAdapter
-        val cb = object : BluetoothGattServerCallback() {
-            override fun onCharacteristicReadRequest(d: BluetoothDevice, id: Int, offset: Int, c: BluetoothGattCharacteristic) {
-                when (c.uuid) {
-                    currentTime -> gatt?.sendResponse(d, id, BluetoothGatt.GATT_SUCCESS, offset, ctsValue())
-                    speedUuid -> gatt?.sendResponse(d, id, BluetoothGatt.GATT_SUCCESS, offset, speedValue())
-                    else -> gatt?.sendResponse(d, id, BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED, offset, null)
+    override fun onLocationChanged(l: Location) { mph = if(l.hasSpeed()) (l.speed * 2.2369363f).coerceAtLeast(0f) else 0f; fixAt = SystemClock.elapsedRealtime() }
+    override fun onStatusChanged(p: String?, s: Int, b: Bundle?) {}
+    override fun onProviderEnabled(p: String) {}
+    override fun onProviderDisabled(p: String) { fixAt = 0 }
+    private fun tick() {
+        if(connection == null) {
+            val dev = usb.deviceList.values.firstOrNull { it.vendorId == 0x303a && it.productId == 0x1001 }
+            if(dev == null) { state = "Waiting for StamPLC USB device"; return }
+            if(!usb.hasPermission(dev)) {
+                state = "Waiting for Android USB permission"
+                if(requested != dev.deviceName) {
+                    requested = dev.deviceName
+                    val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if(Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
+                    usb.requestPermission(dev, PendingIntent.getBroadcast(this, 1, Intent(permissionAction).setPackage(packageName), flags))
+                }
+                return
+            }
+            var selected: UsbInterface? = null
+            var ep: UsbEndpoint? = null
+            for(n in 0 until dev.interfaceCount) {
+                val iface = dev.getInterface(n)
+                if(iface.interfaceClass == UsbConstants.USB_CLASS_COMM) controlId = iface.id
+                if(iface.interfaceClass == UsbConstants.USB_CLASS_CDC_DATA) {
+                    for(k in 0 until iface.endpointCount) {
+                        val endpoint = iface.getEndpoint(k)
+                        if(endpoint.type == UsbConstants.USB_ENDPOINT_XFER_BULK && endpoint.direction == UsbConstants.USB_DIR_OUT) { selected = iface; ep = endpoint }
+                    }
                 }
             }
+            val iface = selected ?: error("CDC data interface missing")
+            val conn = usb.openDevice(dev) ?: error("Android could not open StamPLC")
+            connection = conn
+            if(!conn.claimInterface(iface, true)) error("Could not claim CDC data interface")
+            dataInterface = iface
+            output = ep ?: error("Bulk OUT endpoint missing")
+            val rate = byteArrayOf(0x00,0xc2.toByte(),0x01,0x00,0x00,0x00,0x08)
+            conn.controlTransfer(0x21,0x20,0,controlId,rate,rate.size,1000)
+            conn.controlTransfer(0x21,0x22,1,controlId,null,0,1000)
         }
-        gatt = mgr.openGattServer(this, cb) ?: error("GATT server unavailable")
-        val timeService = BluetoothGattService(cts, BluetoothGattService.SERVICE_TYPE_PRIMARY)
-        timeService.addCharacteristic(BluetoothGattCharacteristic(currentTime, BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ))
-        gatt?.addService(timeService)
-        val speedService = BluetoothGattService(clockBtService, BluetoothGattService.SERVICE_TYPE_PRIMARY)
-        speedService.addCharacteristic(BluetoothGattCharacteristic(speedUuid, BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_NOTIFY, BluetoothGattCharacteristic.PERMISSION_READ))
-        gatt?.addService(speedService)
-        val adv = a.bluetoothLeAdvertiser ?: error("BLE advertiser unavailable")
-        adv.startAdvertising(AdvertiseSettings.Builder().setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_POWER)
-            .setConnectable(true).setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_LOW).build(),
-            AdvertiseData.Builder().setIncludeDeviceName(true).addServiceUuid(ParcelUuid(cts)).addServiceUuid(ParcelUuid(clockBtService)).build(),
-            object : AdvertiseCallback() {})
+        val now = LocalTime.now()
+        val speed = if(SystemClock.elapsedRealtime() - fixAt < 5000 && fixAt != 0L) mph else 0f
+        val bytes = String.format(Locale.US,"TIME,%02d:%02d\nSPEED,%.1f\n",now.hour,now.minute,speed).toByteArray(Charsets.US_ASCII)
+        val sent = connection!!.bulkTransfer(output!!,bytes,bytes.size,1000)
+        if(sent != bytes.size) error("USB write failed ($sent of ${bytes.size} bytes)")
+        writes++
+        state = String.format(Locale.US,"USB writes confirmed: %d\nTime %02d:%02d\nSpeed %.1f MPH\nGPS: %s",writes,now.hour,now.minute,speed,if(fixAt != 0L && SystemClock.elapsedRealtime()-fixAt < 5000) "receiving" else "waiting for fix")
+        if(writes % 10L == 1L) Log.i("ClockUSB",state)
     }
-
-    private fun startUsbSerial() {
-        val um = getSystemService(USB_SERVICE) as UsbManager
-        val dev = um.deviceList.values.firstOrNull() ?: return
-        if (!um.hasPermission(dev)) { status.text = "Clock BT\nWaiting for USB permission"; return }
-        val iface = dev.getInterface(0)
-        val out = (0 until iface.endpointCount).map { iface.getEndpoint(it) }.firstOrNull { it.direction == 0 }
-        usbConnection = um.openDevice(dev)
-        if (usbConnection != null && out != null && usbConnection!!.claimInterface(iface, true)) {
-            Thread {
-                while (!isFinishing) {
-                    val n = ZonedDateTime.now()
-                    val msg = "TIME,%02d:%02d\\nSPEED,%.1f\\n".format(n.hour, n.minute, speedKmh * 0.621371f)
-                    usbConnection?.bulkTransfer(out, msg.toByteArray(), msg.length, 1000)
-                    Thread.sleep(10000)
-                }
-            }.start()
-        }
+    @Synchronized private fun closeUsb() {
+        try { dataInterface?.let { connection?.releaseInterface(it) }; connection?.close() } catch(_: Exception) {}
+        connection = null; dataInterface = null; output = null
     }
-
-    override fun onDestroy() { gatt?.close(); super.onDestroy() }
+    override fun onStartCommand(i: Intent?, flags: Int, id: Int) = START_STICKY
+    override fun onBind(i: Intent?) : IBinder? = null
+    override fun onDestroy() { running = false; closeUsb(); try { unregisterReceiver(receiver); locations.removeUpdates(this) } catch(_: Exception) {}; super.onDestroy() }
 }
