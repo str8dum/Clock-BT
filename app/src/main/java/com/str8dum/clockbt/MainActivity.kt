@@ -43,9 +43,9 @@ class MainActivity : Activity() {
             startUsbSerial()
             status.text = "Clock BT\nRunning\nTime and GPS speed available to StamPLC"
         } catch (e: SecurityException) {
-            status.text = "Clock BT\nBluetooth permission required"
+            status.text = "Clock BT\nUSB serial permission required"
         } catch (e: Exception) {
-            status.text = "Clock BT\nBluetooth unavailable: ${e.javaClass.simpleName}"
+            status.text = "Clock BT\nUSB serial unavailable: ${e.javaClass.simpleName}"
         }
     }
 
