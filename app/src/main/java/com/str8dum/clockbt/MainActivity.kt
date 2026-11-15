@@ -8,6 +8,8 @@ import android.content.pm.PackageManager
 import android.location.*
 import android.os.Bundle
 import android.os.ParcelUuid
+import android.app.PendingIntent
+import android.content.Intent
 import android.hardware.usb.UsbManager
 import android.hardware.usb.UsbDeviceConnection
 import android.widget.TextView
