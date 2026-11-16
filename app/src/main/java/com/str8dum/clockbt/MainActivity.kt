@@ -56,6 +56,8 @@ class ClockService : Service(), LocationListener {
     private var output: UsbEndpoint?=null
     private var deviceName: String?=null
     private var requested: String?=null
+    private var permissionRequestedAt=0L
+    private val permissionRetryMs=30000L
     private var denied: String?=null
     private var retryAt=0L
     private var nextSend=0L
@@ -70,8 +72,8 @@ class ClockService : Service(), LocationListener {
     @Volatile private var fixAt=0L
     @Volatile private var mph=0f
     @Volatile private var gpsState="Waiting for GPS permission"
-    private var gpsStarted=false
-    private var gpsRetryAt=0L
+    @Volatile private var gpsStarted=false
+    @Volatile private var gpsRetryAt=0L
     private val receiver=object:BroadcastReceiver(){
         override fun onReceive(c:Context,i:Intent){events.add(Intent(i))}
     }
@@ -99,7 +101,7 @@ class ClockService : Service(), LocationListener {
     private fun updateGps(){
         if(gpsStarted || SystemClock.elapsedRealtime()<gpsRetryAt)return
         if(checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)!=PackageManager.PERMISSION_GRANTED){gpsState="GPS permission not granted; time still available";return}
-        if(!gps.isProviderEnabled(LocationManager.GPS_PROVIDER)){gpsState="GPS disabled; time still available";return}
+        if(!gps.isProviderEnabled(LocationManager.GPS_PROVIDER)){gpsState="GPS disabled; time still available";gpsRetryAt=SystemClock.elapsedRealtime()+15000;return}
         gps.requestLocationUpdates(LocationManager.GPS_PROVIDER,1000L,0f,this,Looper.getMainLooper())
         gpsStarted=true;gpsState="Waiting for GPS fix"
     }
@@ -130,9 +132,9 @@ class ClockService : Service(), LocationListener {
             val d=i.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)?:continue
             if(d.vendorId!=0x303a || d.productId!=0x1001)continue
             when(i.action){
-                action->{requested=null;if(!i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED,false)){denied=d.deviceName;state="USB access denied. Reconnect StamPLC to retry."}}
-                UsbManager.ACTION_USB_DEVICE_DETACHED->{if(d.deviceName==deviceName)closeUsb();if(requested==d.deviceName)requested=null;if(denied==d.deviceName)denied=null}
-                UsbManager.ACTION_USB_DEVICE_ATTACHED->{denied=null;requested=null;retryAt=0}
+                action->{requested=null;permissionRequestedAt=0;if(!i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED,false)){denied=d.deviceName;state="USB access denied. Reconnect StamPLC to retry."}}
+                UsbManager.ACTION_USB_DEVICE_DETACHED->{if(d.deviceName==deviceName)closeUsb();if(requested==d.deviceName){requested=null;permissionRequestedAt=0};if(denied==d.deviceName)denied=null}
+                UsbManager.ACTION_USB_DEVICE_ATTACHED->{denied=null;requested=null;permissionRequestedAt=0;retryAt=0}
             }
         }
     }
@@ -144,13 +146,16 @@ class ClockService : Service(), LocationListener {
         if(!usb.hasPermission(d)){
             if(denied==d.deviceName){state="USB access denied. Reconnect StamPLC to retry.";return false}
             state="Approve Android USB access to StamPLC"
-            if(requested!=d.deviceName){
+            val now=SystemClock.elapsedRealtime()
+            if(requested!=d.deviceName || now-permissionRequestedAt>=permissionRetryMs){
                 requested=d.deviceName
+                permissionRequestedAt=now
                 val flags=PendingIntent.FLAG_UPDATE_CURRENT or if(Build.VERSION.SDK_INT>=31)PendingIntent.FLAG_MUTABLE else 0
                 usb.requestPermission(d,PendingIntent.getBroadcast(this,1,Intent(action).setPackage(packageName),flags))
             }
             return false
         }
+        requested=null;permissionRequestedAt=0;denied=null
         var found:UsbInterface?=null
         for(n in 0 until d.interfaceCount){
             val it=d.getInterface(n)
