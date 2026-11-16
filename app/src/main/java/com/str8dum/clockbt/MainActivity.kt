@@ -109,8 +109,21 @@ class ClockService : Service(), LocationListener {
         mph=(l.speed*2.2369363f).coerceIn(0f,300f);fixAt=SystemClock.elapsedRealtime();gpsState="GPS receiving"
     }
     override fun onStatusChanged(p:String?,s:Int,b:Bundle?){}
-    override fun onProviderEnabled(p:String){}
-    override fun onProviderDisabled(p:String){fixAt=0;gpsState="GPS disabled"}
+    override fun onProviderEnabled(p:String){
+        if(p==LocationManager.GPS_PROVIDER){
+            gpsStarted=false
+            gpsRetryAt=SystemClock.elapsedRealtime()+1000
+            gpsState="Waiting for GPS fix"
+        }
+    }
+    override fun onProviderDisabled(p:String){
+        if(p==LocationManager.GPS_PROVIDER){
+            fixAt=0
+            gpsStarted=false
+            gpsRetryAt=0
+            gpsState="GPS disabled"
+        }
+    }
     private fun processEvents(){
         while(true){
             val i=events.poll()?:break
