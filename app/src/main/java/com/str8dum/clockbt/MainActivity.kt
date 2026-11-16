@@ -57,7 +57,7 @@ class ClockService : Service(), LocationListener {
     private var deviceName: String?=null
     private var requested: String?=null
     private var permissionRequestedAt=0L
-    private val permissionRetryMs=30000L
+
     private var denied: String?=null
     private var retryAt=0L
     private var nextSend=0L
@@ -69,8 +69,8 @@ class ClockService : Service(), LocationListener {
     private var line=StringBuilder()
     private var expected=""
     @Volatile private var running=true
-    @Volatile private var fixAt=0L
-    @Volatile private var mph=0f
+    private data class SpeedFix(val mph: Float, val at: Long)
+    @Volatile private var speedFix: SpeedFix?=null
     @Volatile private var gpsState="Waiting for GPS permission"
     @Volatile private var gpsStarted=false
     @Volatile private var gpsRetryAt=0L
@@ -108,7 +108,7 @@ class ClockService : Service(), LocationListener {
     override fun onLocationChanged(l:Location){
         val age=SystemClock.elapsedRealtimeNanos()-l.elapsedRealtimeNanos
         if(age<0 || age>5000000000L || !l.hasSpeed() || !l.speed.isFinite())return
-        mph=(l.speed*2.2369363f).coerceIn(0f,300f);fixAt=SystemClock.elapsedRealtime();gpsState="GPS receiving"
+        speedFix=SpeedFix((l.speed*2.2369363f).coerceIn(0f,300f), SystemClock.elapsedRealtime());gpsState="GPS receiving"
     }
     override fun onStatusChanged(p:String?,s:Int,b:Bundle?){}
     override fun onProviderEnabled(p:String){
@@ -120,7 +120,7 @@ class ClockService : Service(), LocationListener {
     }
     override fun onProviderDisabled(p:String){
         if(p==LocationManager.GPS_PROVIDER){
-            fixAt=0
+            speedFix=null
             gpsStarted=false
             gpsRetryAt=0
             gpsState="GPS disabled"
@@ -145,9 +145,9 @@ class ClockService : Service(), LocationListener {
         val d=matches.single()
         if(!usb.hasPermission(d)){
             if(denied==d.deviceName){state="USB access denied. Reconnect StamPLC to retry.";return false}
-            state="Approve Android USB access to StamPLC"
             val now=SystemClock.elapsedRealtime()
-            if(requested!=d.deviceName || now-permissionRequestedAt>=permissionRetryMs){
+            state=if(requested==d.deviceName && now-permissionRequestedAt>=30000L) "USB permission pending. Reconnect StamPLC to retry." else "Approve Android USB access to StamPLC"
+            if(requested!=d.deviceName){
                 requested=d.deviceName
                 permissionRequestedAt=now
                 val flags=PendingIntent.FLAG_UPDATE_CURRENT or if(Build.VERSION.SDK_INT>=31)PendingIntent.FLAG_MUTABLE else 0
@@ -169,7 +169,7 @@ class ClockService : Service(), LocationListener {
         }
         check(inEp!=null && outEp!=null){"CDC bulk endpoints missing"}
         val c=usb.openDevice(d)?:error("Android USB open failed")
-        if(!c.claimInterface(it,true)){c.close();error("CDC interface claim failed")}
+        if(!c.claimInterface(it,false)){c.close();error("CDC interface claim failed")}
         conn=c;iface=it;input=inEp;output=outEp;deviceName=d.deviceName
         // ESP32-S3 fixed USB Serial/JTAG is not a UART bridge. Avoid reset-capable
         // DTR/RTS and unnecessary line-coding requests. Use only its CDC bulk pipes.
@@ -186,7 +186,8 @@ class ClockService : Service(), LocationListener {
         if(pending>=0 && now-sentAt>5000)error("No controller acknowledgment; requires CLOCK protocol firmware")
         if(pending<0 && now>=nextSend){
             val t=LocalTime.now()
-            val speed=if(fixAt!=0L && now-fixAt<5000)mph else 0f
+            val sample=speedFix
+            val speed=if(sample!=null && now-sample.at<5000)sample.mph else 0f
             seq=(seq+1)%2147483647L
             expected=String.format(Locale.US,"%d,%02d,%02d,%d",seq,t.hour,t.minute,(speed*10).toInt())
             val bytes=("CLOCK,"+expected+"\n").toByteArray(Charsets.US_ASCII)
