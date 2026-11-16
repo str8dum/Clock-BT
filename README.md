@@ -1,7 +1,5 @@
-# Clock-BT
+# Clock USB
 
-Android BLE Current Time Service (CTS) server for a Joying radio. The app publishes the radio's current Android system time so a StamPLC BLE central can synchronize its clock.
+Android app for the Joying radio that sends system time and GPS speed to the StamPLC over USB serial. The controller acknowledges each update.
 
-Builds with GitHub Actions; install the generated APK on the Joying radio.
-
-The app displays a running status screen and publishes GPS speed when available.
+Build with GitHub Actions; the workflow publishes the APK and source revision.
